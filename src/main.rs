@@ -1,11 +1,31 @@
-use std::io::{self, Read, Write};
+use std::{
+    collections::HashMap,
+    convert::TryFrom,
+    io::{self, Read, Write},
+    env
+};
+
+// static HELLO_WORLD: &'static str = "++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++.";
 
 fn main() {
-    let program = Program::from(",.");
-    program.run_program();
+    let mut args = env::args();
+    if let Some(s) = args.nth(1) {
+        let res = run_program(&s);
+    
+        if let Err(err) = res {
+            println!("Error encountered: {:?}", err);
+        }
+    } else {
+        println!("Need to provide brainfuck program.");
+    }
 }
 
-#[derive(Debug)]
+fn run_program(s: &str) -> Result<(), Error> {
+    let prog = Program::try_from(s)?;
+    prog.run_program()
+}
+
+#[derive(Debug, PartialEq)]
 enum Operation {
     IncrementDp,
     DecrementDp,
@@ -34,10 +54,51 @@ impl Operation {
     }
 }
 
-struct Program(Vec<Operation>);
+struct Program {
+    ops: Vec<Operation>,
+    // hashmap connecting indices of brackets
+    bracket_map: HashMap<usize, usize>,
+}
+
+#[derive(Debug)]
+enum Error {
+    BracketMismatch,
+}
+
+fn get_bracket_map(ops: &[Operation]) -> Result<HashMap<usize, usize>, Error> {
+    let mut map = HashMap::new();
+    let mut stack = Vec::new();
+
+    for (i, op) in ops.iter().enumerate() {
+        match op {
+            Operation::LeftBracket => {
+                stack.push(i);
+            }
+            Operation::RightBracket => {
+                if let Some(left_index) = stack.pop() {
+                    // map is "double-sided"
+                    map.insert(left_index, i);
+                    map.insert(i, left_index);
+                } else {
+                    return Err(Error::BracketMismatch);
+                }
+            }
+
+            _ => (),
+        }
+    }
+
+    if !stack.is_empty() {
+        return Err(Error::BracketMismatch);
+    }
+
+    Ok(map)
+}
 
 impl Program {
-    fn run_program(&self) {
+    fn run_program(&self) -> Result<(), Error> {
+        let bracket_map = &self.bracket_map;
+
         let stdout = io::stdout();
         let stdin = io::stdin();
 
@@ -45,11 +106,13 @@ impl Program {
         let mut data = [0u8; 30_000];
         let mut data_index = 0usize;
 
-        let mut input_buffer = [0u8; 1];
+        let mut op_ptr = 0usize;
+        let prog_len = self.ops.len();
 
         use Operation::*;
-        for o in &self.0 {
-            match o {
+
+        while op_ptr < prog_len {
+            match self.ops[op_ptr] {
                 IncrementDp => data_index = data_index.wrapping_add(1),
                 DecrementDp => data_index = data_index.wrapping_sub(1),
                 IncrementByte => data[data_index] = data[data_index].wrapping_add(1),
@@ -61,28 +124,47 @@ impl Program {
                         .expect("Unable to write data to screen");
                 }
                 InputByte => {
-                    stdin
+                    data[data_index] = stdin
                         .lock()
-                        .read_exact(&mut input_buffer)
-                        .expect("Unable to read byte");
-                    data[data_index] = input_buffer[0];
+                        .bytes()
+                        .next()
+                        .and_then(|res| res.ok())
+                        .unwrap_or(data[data_index]);
                 }
-                _ => (),
-                // LeftBracket =>
+                LeftBracket => {
+                    let byte = data[data_index];
+                    if byte == 0 {
+                        let right_bracket = bracket_map.get(&op_ptr).unwrap();
+                        op_ptr = *right_bracket;
+                    }
+                }
+                RightBracket => {
+                    let byte = data[data_index];
+                    if byte != 0 {
+                        let left_bracket = bracket_map.get(&op_ptr).unwrap();
+                        op_ptr = *left_bracket;
+                    }
+                }
             };
+            op_ptr += 1;
         }
+
+        Ok(())
     }
 }
 
-impl From<&str> for Program {
-    fn from(s: &str) -> Program {
-        Program(str_to_ops(s))
-    }
-}
+impl TryFrom<&str> for Program {
+    type Error = Error;
 
-fn str_to_ops(s: &str) -> Vec<Operation> {
-    s.chars()
-        .into_iter()
-        .filter_map(|c| Operation::from_char(c))
-        .collect()
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        let arr: Vec<_> = s.chars().filter_map(Operation::from_char).collect();
+        let bracket_map = get_bracket_map(&arr)?;
+
+        let prog = Program {
+            ops: arr,
+            bracket_map,
+        };
+
+        Ok(prog)
+    }
 }
